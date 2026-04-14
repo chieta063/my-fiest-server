@@ -33,6 +33,12 @@ func main() {
 		})
 	})
 
+	r.GET("/ping", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "pong",
+		})
+	})
+
 	port := cmp.Or(os.Getenv("PORT"), "8080")
 
 	logger.Info("Server starting", slog.String("port", port))
