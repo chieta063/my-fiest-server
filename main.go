@@ -2,32 +2,34 @@ package main
 
 import (
 	"cmp"
-	"database/sql"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/lib/pq"
 	sloggin "github.com/samber/slog-gin"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
+// Message はGORMのモデル。タグでテーブルのカラムと対応させる
 type Message struct {
-	ID        int       `json:"id"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
+	gorm.Model        // ID, CreatedAt, UpdatedAt, DeletedAt を自動で追加してくれる
+	Body       string `json:"body" gorm:"not null"`
 }
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	gin.SetMode(gin.ReleaseMode)
 
-	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	// GORMでDB接続
+	db, err := gorm.Open(postgres.Open(os.Getenv("DATABASE_URL")), &gorm.Config{})
 	if err != nil {
 		logger.Error("Failed to connect to database", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
-	defer db.Close()
+
+	// マイグレーション（Messageモデルに対応するテーブルを自動で作成・更新する）
+	db.AutoMigrate(&Message{})
 
 	r := gin.New()
 	r.Use(sloggin.New(logger))
@@ -53,50 +55,46 @@ func main() {
 	})
 
 	r.GET("/db-check", func(c *gin.Context) {
-		err := db.Ping()
+		sqlDB, err := db.DB()
 		if err != nil {
+			c.JSON(500, gin.H{"error": "DB connection failed"})
+			return
+		}
+		if err := sqlDB.Ping(); err != nil {
 			c.JSON(500, gin.H{"error": "DB connection failed"})
 			return
 		}
 		c.JSON(200, gin.H{"message": "DB connected!"})
 	})
 
+	// メッセージを保存するエンドポイント
 	r.POST("/messages", func(c *gin.Context) {
 		var input struct {
 			Body string `json:"body"`
 		}
+		// リクエストのJSONを受け取る
 		if err := c.ShouldBindJSON(&input); err != nil {
 			c.JSON(400, gin.H{"error": "Invalid request"})
 			return
 		}
-		var message Message
-		err := db.QueryRow(
-			"INSERT INTO messages (body) VALUES ($1) RETURNING id, body, created_at",
-			input.Body,
-		).Scan(&message.ID, &message.Body, &message.CreatedAt)
-		if err != nil {
+		// GORMでINSERT
+		message := Message{Body: input.Body}
+		result := db.Create(&message)
+		if result.Error != nil {
 			c.JSON(500, gin.H{"error": "Failed to save message"})
 			return
 		}
 		c.JSON(201, message)
 	})
 
+	// メッセージ一覧を取得するエンドポイント
 	r.GET("/messages", func(c *gin.Context) {
-		rows, err := db.Query("SELECT id, body, created_at FROM messages ORDER BY created_at DESC")
-		if err != nil {
+		var messages []Message
+		// GORMでSELECT
+		result := db.Order("created_at desc").Find(&messages)
+		if result.Error != nil {
 			c.JSON(500, gin.H{"error": "Failed to get messages"})
 			return
-		}
-		defer rows.Close()
-
-		messages := []Message{}
-		for rows.Next() {
-			var message Message
-			if err := rows.Scan(&message.ID, &message.Body, &message.CreatedAt); err != nil {
-				c.JSON(500, gin.H{"error": "Failed to scan message"})
-				return
-			}
-			messages = append(messages, message)
 		}
 		c.JSON(200, messages)
 	})
@@ -105,4 +103,3 @@ func main() {
 	logger.Info("Server starting", slog.String("port", port))
 	r.Run((":" + port))
 }
-
